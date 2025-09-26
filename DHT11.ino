@@ -4,15 +4,44 @@
 #include <Adafruit_Sensor.h>
 #include <DHT.h>
 
-#define SCREEN_WIDTH 128  // OLED display width, in pixels
-#define SCREEN_HEIGHT 64  // OLED display height, in pixels
+#include <ESP8266WiFi.h>
+
+// Replace with your network credentials
+const char* ssid = "OPPO A54";
+const char* password = "tanlee123";
+
+// Set web server port number to 80
+WiFiServer server(80);
+
+// Variable to store the HTTP request
+String header;
+
+// Auxiliar variables to store the current output state
+String output5State = "off";
+String output4State = "off";
+
+// Assign output variables to GPIO pins
+const int output5 = 12;
+const int output4 = 13;
+
+// Current time
+unsigned long currentTime = millis();
+// Previous time
+unsigned long previousTime = 0;
+// Define timeout time in milliseconds (example: 2000ms = 2s)
+const long timeoutTime = 2000;
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
 
 // Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 #define DHTPIN 14  // Digital pin connected to the DHT sensor
 #define btnPin 2
-#define ledPin 13
+#define pumperPin 12
+#define fanPin 13
+#define ledPin 15
 
 // Uncomment the type of sensor in use:
 #define DHTTYPE DHT11  // DHT 11
@@ -38,11 +67,29 @@ ICACHE_RAM_ATTR void debounceBtn() {
 }
 
 void setup() {
+  Serial.begin(115200);
+  // Connect to Wi-Fi network with SSID and password
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  // Print local IP address and start web server
+  Serial.println("");
+  Serial.println("WiFi connected.");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+  server.begin();
+
   pinMode(btnPin, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(btnPin), debounceBtn, FALLING);
 
   pinMode(ledPin, OUTPUT);
-  Serial.begin(115200);
+  pinMode(pumperPin, OUTPUT);
+  pinMode(fanPin, OUTPUT);
+
   dht.begin();
 
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
@@ -197,25 +244,25 @@ uint8_t save() {
   return 255;
 }
 
-uint8_t limTemp = 30;
+float limTemp = 30;
 float limSoil = 50;
 bool isSleep = false;
 
 bool savedWindow = false;
 
-void setTemp() {
+void setVal(String header, int start, int stop, char unit, float* target) {
   static bool savedTemp = false;
-  static uint8_t tempC;
+  static uint8_t temp;
 
   uint8_t hover;
   static uint8_t numPressed = 0;
-  static bool item1 = 1, item2 = 0, item3 = 0;
+  bool item1 = 1, item2 = 0, item3 = 0;
   static bool focus = true;
 
   if (savedTemp) {
     savedTemp = false;
     selectedOption = 255;  //Get out of this option forever
-    limTemp = tempC;
+    *target = temp;
     return;
   }
 
@@ -235,47 +282,35 @@ void setTemp() {
 
   if (btnPressed) {
     ++numPressed;
-    // if (numPressed == 2) {
-    //   switch (hover) {
-    //     case 0:
-    //       numPressed = 0;
-    //       alignText(25, String(tempC) + " C", 41, 2);
-    //       break;
-    //     case 1:
-
-    //       break;
-    //     case 2:
-    //       savedWindow = true;
-    //       btnPressed = false;
-    //       return;
-    //     default:
-    //       break;
-    //   }
-    // }
+    btnPressed = false;
   }
 
   if (focus) {
-    tempC = numSelected(23, 28);
+    temp = numSelected(stop - start + 1, start);
   } else {
     hover = numSelected(3);
   }
 
-  alignText(2, "Temperature limit");
+  alignText(2, header);
   display.drawLine(0, 11, 127, 11, 1);
 
-  alignText(25, String(tempC) + " C", 41, 2);
+  if (unit == 'C') {
+    display.drawCircle(72, 23, 2, 1);
+    alignText(25, String(temp) + " C", 41, 2);
+  } else {
+    alignText(25, String(temp) + " " + unit, 41, 2);
+  }
 
   static const unsigned char PROGMEM image_crosshairs_bits[] = { 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x04, 0x00, 0x0e, 0x00, 0x15, 0x00, 0x24, 0x80, 0xfb, 0xe0, 0x24, 0x80, 0x15, 0x00, 0x0e, 0x00, 0x04, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 
   // 0: focus
   if (numPressed == 0) {
+    focus = true;
     display.fillRect(115, 16, 13, 13, 1);
-    display.drawBitmap(116, 15, image_crosshairs_bits, 11, 16, 0);
     display.drawRoundRect(0, 48, 63, 16, 7, 1);
     display.drawRoundRect(65, 48, 63, 16, 7, 1);
-  }
-  // 1: exit focus and go to hover
-  if (numPressed == 1) {
+  } else if (numPressed == 1) {
+    // 1: exit focus and go to hover
     focus = false;
     switch (hover) {
       case 0:
@@ -297,70 +332,57 @@ void setTemp() {
       default:
         break;
     }
+  } else if (numPressed == 2) {
+    numPressed = 0;
+    switch (hover) {
+      case 0:
+        focus = true;
+        break;
+      case 1:
+        selectedOption = 255;
+        break;
+      case 2:
+        savedWindow = true;
+        return;
+      default:
+        break;
+    }
   }
 
+  display.drawBitmap(116, 15, image_crosshairs_bits, 11, 16, !item1);
   alignText(52, "Back", 21, 1, !item2);
   alignText(52, "Save", 85, 1, !item3);
 
-  display.drawCircle(72, 23, 2, 1);
-  
   display.display();
 }
 
+void setTemp() {
+  setVal("Temperature limit", 28, 50, 'C', &limTemp);
+}
+
 void setSoil() {
+  setVal("Soil moisture", 0, 100, '%', &limSoil);
 }
 
 void setSleep() {
-}
-
-void manual() {
-}
-
-void diagnose() {
-}
-
-void exit() {
-  isSettings = false;
-  btnPressed = false;
+  isSleep = !isSleep;
   selectedOption = 255;
+  btnPressed = false;
 }
 
-const uint8_t numOptions = 6;
-void dispMenu(String options[]) {
-  void (*function[numOptions])(void) = { setTemp, setSoil, setSleep, diagnose, manual, exit };
+void dispMenu(String options[], const unsigned char* const image_arrays[], void (*function[])(void), uint8_t numOptions, uint8_t* placeHolder) {
 
   uint8_t hover = numSelected(numOptions);
 
-  if (selectedOption != 255) {
-    function[selectedOption]();
+  if (*placeHolder != 255) {
+    function[*placeHolder]();
     return;
   }
 
   if (btnPressed) {
-    selectedOption = hover;
+    *placeHolder = hover;
     btnPressed = false;
   }
-
-  static const unsigned char PROGMEM image_device_sleep_mode_white_bits[] = { 0x04, 0x00, 0x1c, 0x0e, 0x28, 0x02, 0x48, 0x04, 0x51, 0xee, 0x90, 0x40, 0x90, 0x80, 0x91, 0xe0, 0x88, 0x00, 0x88, 0x06, 0x46, 0x1c, 0x41, 0xe4, 0x20, 0x08, 0x18, 0x30, 0x07, 0xc0, 0x00, 0x00 };
-
-  static const unsigned char PROGMEM image_Temperature_bits[] = { 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x80, 0x02, 0x80, 0x02, 0x80, 0x02, 0x80, 0x02, 0x80, 0x02, 0x80, 0x04, 0x40, 0x07, 0xc0, 0x07, 0xc0, 0x03, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-
-  static const unsigned char PROGMEM image_weather_humidity_white_bits[] = { 0x04, 0x00, 0x04, 0x00, 0x0c, 0x00, 0x0a, 0x00, 0x12, 0x00, 0x11, 0x00, 0x20, 0x80, 0x20, 0x80, 0x41, 0x40, 0x40, 0xc0, 0x80, 0xa0, 0x80, 0x20, 0x40, 0x40, 0x40, 0x40, 0x30, 0x80, 0x0f, 0x00 };
-
-  static const unsigned char PROGMEM image_crossed_bits[] = { 0x00, 0x00, 0x00, 0x00, 0xc0, 0x60, 0xe0, 0xe0, 0x71, 0xc0, 0x3b, 0x80, 0x1f, 0x00, 0x0e, 0x00, 0x1f, 0x00, 0x3b, 0x80, 0x71, 0xc0, 0xe0, 0xe0, 0xc0, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-
-  static const unsigned char PROGMEM image_menu_tool_wrench_bits[] = { 0x00, 0x00, 0x00, 0xe0, 0x01, 0x60, 0x02, 0x80, 0x02, 0x8c, 0x03, 0x0c, 0x02, 0xb4, 0x02, 0x48, 0x05, 0xf0, 0x0a, 0x00, 0x14, 0x00, 0x28, 0x00, 0x50, 0x00, 0xa0, 0x00, 0xc0, 0x00, 0x00, 0x00 };
-
-  static const unsigned char PROGMEM image_menu_settings_sliders_bits[] = { 0x38, 0x00, 0x44, 0x00, 0xc7, 0xfc, 0x44, 0x00, 0x38, 0x00, 0x00, 0x70, 0x00, 0x88, 0xff, 0x8c, 0x00, 0x88, 0x00, 0x70, 0x38, 0x00, 0x44, 0x00, 0xc7, 0xfc, 0x44, 0x00, 0x38, 0x00, 0x00, 0x00 };
-
-  static const unsigned char* const image_arrays[] = {
-    image_Temperature_bits,
-    image_weather_humidity_white_bits,
-    image_device_sleep_mode_white_bits,
-    image_menu_settings_sliders_bits,
-    image_menu_tool_wrench_bits,
-    image_crossed_bits
-  };
 
   uint8_t y = 0;
   const uint8_t dispAmount = 3;
@@ -378,6 +400,76 @@ void dispMenu(String options[]) {
   display.display();
 }
 
+bool automatic = true;
+
+bool pumper = false, fan = false, led = false;
+uint8_t manualSelectedOption = 255;
+
+void setPumper() {
+  pumper = !pumper;
+  manualSelectedOption = 255;
+};
+
+void setFan() {
+  fan = !fan;
+  manualSelectedOption = 255;
+};
+
+void setLed() {
+  led = !led;
+  manualSelectedOption = 255;
+};
+
+void exitManual() {
+  pumper = false;
+  fan = false;
+  led = false;
+  manualSelectedOption = 255;
+  selectedOption = 255;
+}
+
+void manual() {
+
+  static const unsigned char PROGMEM image_display_brightness_bits[] = { 0x01, 0x00, 0x21, 0x08, 0x10, 0x10, 0x03, 0x80, 0x8c, 0x62, 0x48, 0x24, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x48, 0x24, 0x8c, 0x62, 0x03, 0x80, 0x10, 0x10, 0x21, 0x08, 0x01, 0x00, 0x00, 0x00 };
+
+  static const unsigned char PROGMEM image_weather_humidity_bits[] = { 0x04, 0x00, 0x04, 0x00, 0x0c, 0x00, 0x0e, 0x00, 0x1e, 0x00, 0x1f, 0x00, 0x3f, 0x80, 0x3f, 0x80, 0x7e, 0xc0, 0x7f, 0x40, 0xff, 0x60, 0xff, 0xe0, 0x7f, 0xc0, 0x7f, 0xc0, 0x3f, 0x80, 0x0f, 0x00 };
+
+  static const unsigned char PROGMEM image_weather_wind_bits[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x03, 0x88, 0x04, 0x44, 0x04, 0x44, 0x00, 0x44, 0x00, 0x88, 0xff, 0x32, 0x00, 0x00, 0xad, 0x82, 0x00, 0x60, 0x00, 0x10, 0x00, 0x10, 0x01, 0x20, 0x00, 0xc0 };
+
+  static const unsigned char PROGMEM image_crossed_bits[] = { 0x00, 0x00, 0x00, 0x00, 0xc0, 0x60, 0xe0, 0xe0, 0x71, 0xc0, 0x3b, 0x80, 0x1f, 0x00, 0x0e, 0x00, 0x1f, 0x00, 0x3b, 0x80, 0x71, 0xc0, 0xe0, 0xe0, 0xc0, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+
+  static const unsigned char* const image_arrays[] = {
+    image_weather_humidity_bits,
+    image_weather_wind_bits,
+    image_display_brightness_bits,
+    image_crossed_bits
+  };
+
+  String options[] = {
+    "Pumper: " + String(pumper ? "ON" : "OFF"),
+    "FAN: " + String(fan ? "ON" : "OFF"),
+    "LED: " + String(led ? "ON" : "OFF"),
+    "Exit"
+  };
+
+  void (*function[4])(void) = { setPumper, setFan, setLed, exitManual };
+  dispMenu(options, image_arrays, function, 4, &manualSelectedOption);
+
+  digitalWrite(ledPin, led);
+  digitalWrite(fanPin, fan);
+  digitalWrite(pumperPin, pumper);
+}
+
+void diagnose() {
+  selectedOption = 255;
+}
+
+void exit() {
+  isSettings = false;
+  btnPressed = false;
+  selectedOption = 255;
+}
+
 void loop() {
 
   float t, h;
@@ -387,14 +479,38 @@ void loop() {
   if (!isSettings) {
     dispTempHumi(&t, &h, false);
   } else {
+    static const unsigned char PROGMEM image_device_sleep_mode_white_bits[] = { 0x04, 0x00, 0x1c, 0x0e, 0x28, 0x02, 0x48, 0x04, 0x51, 0xee, 0x90, 0x40, 0x90, 0x80, 0x91, 0xe0, 0x88, 0x00, 0x88, 0x06, 0x46, 0x1c, 0x41, 0xe4, 0x20, 0x08, 0x18, 0x30, 0x07, 0xc0, 0x00, 0x00 };
+
+    static const unsigned char PROGMEM image_Temperature_bits[] = { 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x80, 0x02, 0x80, 0x02, 0x80, 0x02, 0x80, 0x02, 0x80, 0x02, 0x80, 0x04, 0x40, 0x07, 0xc0, 0x07, 0xc0, 0x03, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+
+    static const unsigned char PROGMEM image_weather_humidity_white_bits[] = { 0x04, 0x00, 0x04, 0x00, 0x0c, 0x00, 0x0a, 0x00, 0x12, 0x00, 0x11, 0x00, 0x20, 0x80, 0x20, 0x80, 0x41, 0x40, 0x40, 0xc0, 0x80, 0xa0, 0x80, 0x20, 0x40, 0x40, 0x40, 0x40, 0x30, 0x80, 0x0f, 0x00 };
+
+    static const unsigned char PROGMEM image_crossed_bits[] = { 0x00, 0x00, 0x00, 0x00, 0xc0, 0x60, 0xe0, 0xe0, 0x71, 0xc0, 0x3b, 0x80, 0x1f, 0x00, 0x0e, 0x00, 0x1f, 0x00, 0x3b, 0x80, 0x71, 0xc0, 0xe0, 0xe0, 0xc0, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+
+    static const unsigned char PROGMEM image_menu_tool_wrench_bits[] = { 0x00, 0x00, 0x00, 0xe0, 0x01, 0x60, 0x02, 0x80, 0x02, 0x8c, 0x03, 0x0c, 0x02, 0xb4, 0x02, 0x48, 0x05, 0xf0, 0x0a, 0x00, 0x14, 0x00, 0x28, 0x00, 0x50, 0x00, 0xa0, 0x00, 0xc0, 0x00, 0x00, 0x00 };
+
+    static const unsigned char PROGMEM image_menu_settings_sliders_bits[] = { 0x38, 0x00, 0x44, 0x00, 0xc7, 0xfc, 0x44, 0x00, 0x38, 0x00, 0x00, 0x70, 0x00, 0x88, 0xff, 0x8c, 0x00, 0x88, 0x00, 0x70, 0x38, 0x00, 0x44, 0x00, 0xc7, 0xfc, 0x44, 0x00, 0x38, 0x00, 0x00, 0x00 };
+
+    static const unsigned char* const image_arrays[] = {
+      image_Temperature_bits,
+      image_weather_humidity_white_bits,
+      image_device_sleep_mode_white_bits,
+      image_menu_settings_sliders_bits,
+      image_menu_tool_wrench_bits,
+      image_crossed_bits
+    };
+
     String options[] = {
       "Temp: " + String(limTemp) + "C",
-      "Soil: " + String(limSoil) + "%",
+      "Moisture: " + String(limSoil) + "%",
       "Sleep: " + String(isSleep ? "ON" : "OFF"),
       "Manual",
       "System diagnose",
       "Exit"
     };
-    dispMenu(options);
+
+    void (*function[6])(void) = { setTemp, setSoil, setSleep, manual, diagnose, exit };
+
+    dispMenu(options, image_arrays, function, 6, &selectedOption);
   }
 }
