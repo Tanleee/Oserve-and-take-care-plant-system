@@ -3,34 +3,762 @@
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_Sensor.h>
 #include <DHT.h>
+#include <string>
 
+#include <EEPROM.h>
 #include <ESP8266WiFi.h>
+#include <ESPAsyncTCP.h>
+#include <ESPAsyncWebServer.h>
 
-// Replace with your network credentials
-const char* ssid = "OPPO A54";
-const char* password = "tanlee123";
+bool pumper = false, fan = false, led = false;
+float t = 0, h = 0, brightness = 0, soil = 0;
+bool automatic = true;
 
-// Set web server port number to 80
-WiFiServer server(80);
+unsigned long previousMillis = 0;  // will store last time DHT was updated
+const long interval = 10000;       // Updates DHT readings every 10 seconds
 
-// Variable to store the HTTP request
-String header;
+const char* ssid = "C427";
+const char* password = "64546743";
 
-// Auxiliar variables to store the current output state
-String output5State = "off";
-String output4State = "off";
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
 
-// Assign output variables to GPIO pins
-const int output5 = 12;
-const int output4 = 13;
+// HTML Template với tính năng đầy đủ
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Điều Khiển Thiết Bị IoT</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
 
-// Current time
-unsigned long currentTime = millis();
-// Previous time
-unsigned long previousTime = 0;
-// Define timeout time in milliseconds (example: 2000ms = 2s)
-const long timeoutTime = 2000;
+      body {
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%);
+        min-height: 100vh;
+        padding: 20px;
+      }
 
+      .container {
+        max-width: 1200px;
+        margin: 0 auto;
+      }
+
+      .header {
+        text-align: center;
+        color: white;
+        margin-bottom: 30px;
+      }
+
+      .header h1 {
+        font-size: 2.5em;
+        margin-bottom: 10px;
+        text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+      }
+
+      .status-bar {
+        background: rgba(255, 255, 255, 0.95);
+        border-radius: 15px;
+        padding: 20px;
+        margin-bottom: 30px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        backdrop-filter: blur(10px);
+      }
+
+      .connection-status {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        margin-bottom: 15px;
+      }
+
+      .status-indicator {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%%;
+        background: #4caf50;
+        animation: pulse 2s infinite;
+      }
+
+      @keyframes pulse {
+        0%% {
+          opacity: 1;
+        }
+        50%% {
+          opacity: 0.5;
+        }
+        100%% {
+          opacity: 1;
+        }
+      }
+
+      .disconnected {
+        background: #f44336;
+      }
+
+      .dashboard {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 25px;
+        margin-bottom: 30px;
+      }
+
+      .card {
+        background: rgba(255, 255, 255, 0.95);
+        border-radius: 20px;
+        padding: 25px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        backdrop-filter: blur(10px);
+        transition: transform 0.3s ease, box-shadow 0.3s ease;
+      }
+
+      .card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.15);
+      }
+
+      .card-title {
+        font-size: 1.3em;
+        font-weight: 600;
+        margin-bottom: 20px;
+        color: #333;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .sensor-value {
+        font-size: 2.5em;
+        font-weight: 700;
+        color: #667eea;
+        text-align: center;
+        margin: 15px 0;
+      }
+
+      .sensor-unit {
+        font-size: 0.4em;
+        color: #666;
+        font-weight: normal;
+      }
+
+      .control-group {
+        display: flex;
+        flex-direction: column;
+        gap: 15px;
+      }
+
+      .switch {
+        position: relative;
+        display: inline-block;
+        width: 60px;
+        height: 34px;
+      }
+
+      .switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+
+      .switch input:disabled + .slider {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .slider {
+        position: absolute;
+        cursor: pointer;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background-color: #ccc;
+        transition: 0.4s;
+        border-radius: 34px;
+      }
+
+      .slider:before {
+        position: absolute;
+        content: "";
+        height: 26px;
+        width: 26px;
+        left: 4px;
+        bottom: 4px;
+        transition: 0.4s;
+        border-radius: 50%%;
+        background-color: white;
+      }
+
+      input:checked + .slider {
+        background-color: #4caf50;
+      }
+
+      input:checked + .slider:before {
+        transform: translateX(26px);
+      }
+
+      .control-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 15px;
+        background: rgba(103, 126, 234, 0.1);
+        border-radius: 10px;
+      }
+
+      .control-item.disabled {
+        opacity: 0.6;
+      }
+
+      .control-label {
+        font-weight: 500;
+        color: #333;
+      }
+
+      .device-info {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 15px;
+        margin-top: 15px;
+      }
+
+      .info-item {
+        text-align: center;
+        padding: 15px;
+        background: rgba(103, 126, 234, 0.1);
+        border-radius: 10px;
+      }
+
+      .info-label {
+        font-size: 0.9em;
+        color: #666;
+        margin-bottom: 5px;
+      }
+
+      .info-value {
+        font-size: 1.2em;
+        font-weight: 600;
+        color: #333;
+      }
+
+      .progress-bar {
+        width: 100%%;
+        height: 20px;
+        background: #e0e0e0;
+        border-radius: 10px;
+        overflow: hidden;
+        margin-top: 10px;
+      }
+
+      .progress-fill {
+        height: 100%%;
+        background: linear-gradient(90deg, #4caf50, #8bc34a);
+        transition: width 0.3s ease;
+        border-radius: 10px;
+      }
+
+      .log-container {
+        background: rgba(255, 255, 255, 0.95);
+        border-radius: 15px;
+        padding: 20px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        backdrop-filter: blur(10px);
+      }
+
+      .log-title {
+        font-size: 1.2em;
+        font-weight: 600;
+        margin-bottom: 15px;
+        color: #333;
+      }
+
+      .log-entries {
+        max-height: 200px;
+        overflow-y: auto;
+        background: #f8f9fa;
+        border-radius: 8px;
+        padding: 15px;
+      }
+
+      .log-entry {
+        padding: 8px 0;
+        border-bottom: 1px solid #e9ecef;
+        font-family: "Courier New", monospace;
+        font-size: 0.9em;
+      }
+
+      .log-entry:last-child {
+        border-bottom: none;
+      }
+
+      .timestamp {
+        color: #666;
+        margin-right: 10px;
+      }
+
+      @media (max-width: 768px) {
+        .dashboard {
+          grid-template-columns: 1fr;
+        }
+
+        .header h1 {
+          font-size: 2em;
+        }
+
+        .sensor-value {
+          font-size: 2em;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <header class="header">
+        <h1>🏠 Hệ Thống Điều Khiển IoT</h1>
+        <p>Quản lý và giám sát các thiết bị thông minh</p>
+      </header>
+
+      <div class="status-bar">
+        <div class="connection-status">
+          <div class="status-indicator" id="statusIndicator"></div>
+          <span id="connectionStatus">Đang kết nối...</span>
+        </div>
+        <div class="device-info">
+          <div class="info-item">
+            <div class="info-label">IP Address</div>
+            <div class="info-value" id="deviceIP">%DEVICEIP%</div>
+          </div>
+          <div class="info-item">
+            <div class="info-label">Thời gian hoạt động</div>
+            <div class="info-value" id="uptime">00:00:00</div>
+          </div>
+          <div class="info-item">
+            <div class="info-label">Tín hiệu WiFi</div>
+            <div class="info-value" id="wifiSignal">%WIFISIGNAL% dBm</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="dashboard">
+        <div class="card">
+          <div class="card-title">🌡️ Nhiệt độ</div>
+          <div class="sensor-value" id="temperature">%TEMPERATURE%<span class="sensor-unit">°C</span></div>
+          <div class="progress-bar">
+            <div class="progress-fill" id="tempProgress"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">💧 Độ ẩm không khí</div>
+          <div class="sensor-value" id="humidity">%HUMIDITY%<span class="sensor-unit">%%</span></div>
+          <div class="progress-bar">
+            <div class="progress-fill" id="humidityProgress"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">☀️ Cường độ sáng</div>
+          <div class="sensor-value" id="lightIntensity">%BRIGHTNESS%<span class="sensor-unit">lux</span></div>
+          <div class="progress-bar">
+            <div class="progress-fill" id="lightProgress"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">🌱 Độ ẩm đất</div>
+          <div class="sensor-value" id="soilMoisture">%SOIL%<span class="sensor-unit">%%</span></div>
+          <div class="progress-bar">
+            <div class="progress-fill" id="soilProgress"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">💡 Điều khiển đèn</div>
+          <div class="control-group">
+            <div class="control-item" id="lightControl">
+              <span class="control-label">Đèn LED chính</span>
+              <label class="switch">
+                <input type="checkbox" id="mainLight" onchange="toggleDevice('light1', this.checked)" %LEDCHECK% />
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">🌬️ Điều khiển quạt</div>
+          <div class="control-group">
+            <div class="control-item" id="fanControl">
+              <span class="control-label">Quạt thông gió</span>
+              <label class="switch">
+                <input type="checkbox" id="ventilationFan" onchange="toggleDevice('fan1', this.checked)" %FANCHECK% />
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">🚿 Điều khiển máy bơm</div>
+          <div class="control-group">
+            <div class="control-item" id="pumpControl">
+              <span class="control-label">Máy bơm nước</span>
+              <label class="switch">
+                <input type="checkbox" id="waterPump" onchange="toggleDevice('pump1', this.checked)" %PUMPCHECK% />
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">🤖 Hệ thống tự động</div>
+          <div class="control-group">
+            <div class="control-item">
+              <span class="control-label">Chế độ tự động</span>
+              <label class="switch">
+                <input type="checkbox" id="autoMode" %AUTOCHECK% onchange="toggleAutoMode(this.checked)" />
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="log-container">
+        <div class="log-title">📋 Nhật ký hoạt động</div>
+        <div class="log-entries" id="logEntries">
+          <div class="log-entry">
+            <span class="timestamp">--:--:--</span>
+            <span>Đang khởi tạo hệ thống...</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      let isConnected = false;
+      let isAutoMode = %AUTOMODE%;
+      var gateway = `ws://${window.location.hostname}/ws`;
+      var websocket;
+
+      function initWebSocket() {
+        console.log("Trying to open a WebSocket connection...");
+        websocket = new WebSocket(gateway);
+        websocket.onopen = onOpen;
+        websocket.onclose = onClose;
+        websocket.onmessage = onMessage;
+      }
+      
+      function onOpen(event) {
+        console.log("Connection opened");
+        setConnectionStatus(true);
+        addLogEntry("WebSocket kết nối thành công");
+      }
+      
+      function onClose(event) {
+        console.log("Connection closed");
+        setConnectionStatus(false);
+        addLogEntry("WebSocket mất kết nối, đang thử kết nối lại...");
+        setTimeout(initWebSocket, 2000);
+      }
+      
+      function onMessage(event) {
+        console.log("Received:", event.data);
+        
+        if (event.data == "auto") {
+          isAutoMode = true;
+          document.getElementById("autoMode").checked = true;
+          updateControlStates();
+          return;
+        } else if (event.data == "manual") {
+          isAutoMode = false;
+          document.getElementById("autoMode").checked = false;
+          updateControlStates();
+          return;
+        }
+
+        let deviceId = event.data.slice(0, -1);
+        let state = event.data.endsWith("1");
+        const mapId = {
+          pump1: "waterPump",
+          light1: "mainLight",
+          fan1: "ventilationFan"
+        };
+
+        if (mapId[deviceId]) {
+          document.getElementById(mapId[deviceId]).checked = state;
+        }
+      }
+
+      function updateControlStates() {
+        const controls = ['mainLight', 'ventilationFan', 'waterPump'];
+        const controlDivs = ['lightControl', 'fanControl', 'pumpControl'];
+        
+        controls.forEach((id, index) => {
+          const element = document.getElementById(id);
+          const controlDiv = document.getElementById(controlDivs[index]);
+          
+          if (isAutoMode) {
+            element.disabled = true;
+            controlDiv.classList.add('disabled');
+          } else {
+            element.disabled = false;
+            controlDiv.classList.remove('disabled');
+          }
+        });
+      }
+
+      document.addEventListener("DOMContentLoaded", function () {
+        initWebSocket();
+        initializeSystem();
+        updateUptime();
+        updateWiFiSignal();
+        updateControlStates();
+        
+        // Cập nhật WiFi signal mỗi 5 giây
+        setInterval(updateWiFiSignal, 5000);
+      });
+
+      function initializeSystem() {
+        addLogEntry("Hệ thống khởi động thành công");
+        addLogEntry("Đang kết nối đến server...");
+      }
+
+      function setConnectionStatus(connected) {
+        isConnected = connected;
+        const indicator = document.getElementById("statusIndicator");
+        const status = document.getElementById("connectionStatus");
+
+        if (connected) {
+          indicator.classList.remove("disconnected");
+          status.textContent = "Đã kết nối";
+          status.style.color = "#4caf50";
+        } else {
+          indicator.classList.add("disconnected");
+          status.textContent = "Mất kết nối";
+          status.style.color = "#f44336";
+        }
+      }
+
+      function toggleAutoMode(state) {
+        isAutoMode = state;
+        const action = state ? "BẬT" : "TẮT";
+        addLogEntry(`${action} chế độ tự động`);
+        websocket.send(state ? "auto" : "manual");
+        updateControlStates();
+      }
+
+      function toggleDevice(deviceId, state) {
+        if (isAutoMode) {
+          addLogEntry("Không thể điều khiển thủ công khi đang ở chế độ tự động");
+          return;
+        }
+        
+        const deviceNames = {
+          light1: "Đèn LED chính",
+          fan1: "Quạt thông gió",
+          pump1: "Máy bơm nước"
+        };
+        const action = state ? "BẬT" : "TẮT";
+        addLogEntry(`${action} ${deviceNames[deviceId]}`);
+        websocket.send(deviceId + (state ? "1" : "0"));
+      }
+
+      function updateUptime() {
+        let startTime = Date.now();
+        setInterval(() => {
+          const elapsed = Date.now() - startTime;
+          const hours = Math.floor(elapsed / (1000 * 60 * 60));
+          const minutes = Math.floor((elapsed %% (1000 * 60 * 60)) / (1000 * 60));
+          const seconds = Math.floor((elapsed %% (1000 * 60)) / 1000);
+
+          document.getElementById("uptime").textContent = 
+            `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
+        }, 1000);
+      }
+
+      function updateWiFiSignal() {
+        fetch("/wifiSignal")
+          .then(response => response.text())
+          .then(data => {
+            const rssi = parseInt(data);
+            let quality = "Yếu";
+            let color = "#f44336";
+            
+            if (rssi > -50) {
+              quality = "Xuất sắc";
+              color = "#4caf50";
+            } else if (rssi > -60) {
+              quality = "Tốt";
+              color = "#8bc34a";
+            } else if (rssi > -70) {
+              quality = "Khá";
+              color = "#ffc107";
+            }
+            
+            document.getElementById("wifiSignal").innerHTML = 
+              `<span style="color: ${color}">${data} dBm (${quality})</span>`;
+          })
+          .catch(err => {
+            console.error("Error fetching WiFi signal:", err);
+          });
+      }
+
+      function updateProgressBar(elementId, value, maxValue = 100) {
+        const progressBar = document.getElementById(elementId);
+        const percentage = (value / maxValue) * 100;
+        progressBar.style.width = percentage + '%%';
+      }
+
+      function addLogEntry(message) {
+        const now = new Date();
+        const timestamp = now.toLocaleTimeString("vi-VN");
+        const logEntries = document.getElementById("logEntries");
+        const entry = document.createElement("div");
+        entry.className = "log-entry";
+        entry.innerHTML = `<span class="timestamp">${timestamp}</span><span>${message}</span>`;
+        logEntries.insertBefore(entry, logEntries.firstChild);
+
+        if (logEntries.children.length > 50) {
+          logEntries.removeChild(logEntries.lastChild);
+        }
+        logEntries.scrollTop = 0;
+      }
+
+      // Cập nhật dữ liệu cảm biến
+      setInterval(function () {
+        fetch("/temperature")
+          .then(response => response.text())
+          .then(data => {
+            const temp = parseFloat(data);
+            document.getElementById("temperature").innerHTML = 
+              data + '<span class="sensor-unit">°C</span>';
+            updateProgressBar('tempProgress', temp, 50);
+          });
+      }, 10000);
+
+      setInterval(function () {
+        fetch("/humidity")
+          .then(response => response.text())
+          .then(data => {
+            const hum = parseFloat(data);
+            document.getElementById("humidity").innerHTML = 
+              data + '<span class="sensor-unit">%%</span>';
+            updateProgressBar('humidityProgress', hum, 100);
+          });
+      }, 10000);
+
+      setInterval(function () {
+        fetch("/lightIntensity")
+          .then(response => response.text())
+          .then(data => {
+            const light = parseFloat(data);
+            document.getElementById("lightIntensity").innerHTML = 
+              data + '<span class="sensor-unit">lux</span>';
+            updateProgressBar('lightProgress', light, 1000);
+          });
+      }, 10000);
+
+      setInterval(function () {
+        fetch("/soilMoisture")
+          .then(response => response.text())
+          .then(data => {
+            const soil = parseFloat(data);
+            document.getElementById("soilMoisture").innerHTML = 
+              data + '<span class="sensor-unit">%%</span>';
+            updateProgressBar('soilProgress', soil, 100);
+          });
+      }, 10000);
+    </script>
+  </body>
+</html>
+)rawliteral";
+
+void notifyClients(String message) {
+  ws.textAll(message);
+}
+
+void handleWebSocketMessage(void* arg, uint8_t* data, size_t len) {
+  AwsFrameInfo* info = (AwsFrameInfo*)arg;
+  if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) {
+    data[len] = 0;
+    if (strcmp((char*)data, "auto") == 0) {
+      automatic = true;
+    } else {
+      automatic = false;
+      bool state = strstr((char*)data, "1");
+
+      if (strstr((char*)data, "led")) {
+        led = state;
+      } else if (strstr((char*)data, "pump")) {
+        pumper = state;
+      } else if (strstr((char*)data, "fan")) {
+        fan = state;
+      }
+    }
+    notifyClients(String((char*)data));
+  }
+}
+
+void onEvent(AsyncWebSocket* server, AsyncWebSocketClient* client, AwsEventType type, void* arg, uint8_t* data, size_t len) {
+  switch (type) {
+    case WS_EVT_CONNECT:
+      Serial.printf("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
+      break;
+    case WS_EVT_DISCONNECT:
+      Serial.printf("WebSocket client #%u disconnected\n", client->id());
+      break;
+    case WS_EVT_DATA:
+      handleWebSocketMessage(arg, data, len);
+      break;
+    case WS_EVT_PONG:
+    case WS_EVT_ERROR:
+      break;
+  }
+}
+
+void initWebSocket() {
+  ws.onEvent(onEvent);
+  server.addHandler(&ws);
+}
+
+String processor(const String& var) {
+  if (var == "TEMPERATURE") {
+    return String(t);
+  } else if (var == "HUMIDITY") {
+    return String(h);
+  } else if (var == "SOIL") {
+    return String(soil);
+  } else if (var == "BRIGHTNESS") {
+    return String(brightness);
+  } else if (var == "DEVICEIP") {
+    return WiFi.localIP().toString();
+  } else if (var == "WIFISIGNAL") {
+    return String(WiFi.RSSI());
+  } else if (var == "AUTOMODE") {
+    return automatic ? "true" : "false";
+  } else if (var == "PUMPCHECK") {
+    return pumper ? "checked" : "";
+  } else if (var == "FANCHECK") {
+    return fan ? "checked" : "";
+  } else if (var == "LEDCHECK") {
+    return led ? "checked" : "";
+  } else if (var == "AUTOCHECK") {
+    return automatic ? "checked" : "";
+  }
+
+  return String();
+}
+
+////////////////////////////////
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 
@@ -45,8 +773,6 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 // Uncomment the type of sensor in use:
 #define DHTTYPE DHT11  // DHT 11
-// #define DHTTYPE    DHT22     // DHT 22 (AM2302)
-//#define DHTTYPE    DHT21     // DHT 21 (AM2301)
 
 DHT dht(DHTPIN, DHTTYPE);
 
@@ -65,46 +791,6 @@ ICACHE_RAM_ATTR void debounceBtn() {
   }
   isSettings = true;
 }
-
-void setup() {
-  Serial.begin(115200);
-  // Connect to Wi-Fi network with SSID and password
-  Serial.print("Connecting to ");
-  Serial.println(ssid);
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  // Print local IP address and start web server
-  Serial.println("");
-  Serial.println("WiFi connected.");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
-  server.begin();
-
-  pinMode(btnPin, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(btnPin), debounceBtn, FALLING);
-
-  pinMode(ledPin, OUTPUT);
-  pinMode(pumperPin, OUTPUT);
-  pinMode(fanPin, OUTPUT);
-
-  dht.begin();
-
-  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println(F("SSD1306 allocation failed"));
-    for (;;)
-      ;
-  }
-  delay(2000);
-  display.clearDisplay();
-  display.setTextColor(WHITE);
-  //lowercase: (5,5)  | uppercase: (5,7)
-  // space between each letter 1 pixel
-}
-
-const uint16_t duration = 5000;
 
 void dispLoading(uint8_t percent, int delayTime) {
   static const unsigned char PROGMEM image_Alert_bits[] = { 0x08, 0x00, 0x1c, 0x00, 0x14, 0x00, 0x36, 0x00, 0x36, 0x00, 0x7f, 0x00, 0x77, 0x00, 0xff, 0x80 };
@@ -132,6 +818,108 @@ void dispLoading(uint8_t percent, int delayTime) {
   delay(delayTime);
 }
 
+void saveToEEPROM(int address, float value) {
+  EEPROM.write(address, value);
+  EEPROM.commit();
+}
+
+float readFromEEPROM(int address) {
+  return EEPROM.read(address);
+}
+
+float limTemp = 30;
+float limSoil = 50;
+
+#define EEPROM_SIZE 32
+// 32 bytes 
+
+void setup() {
+  Serial.begin(115200);
+  EEPROM.begin(EEPROM_SIZE);
+
+  float val1 = readFromEEPROM(0);
+  float val2 = readFromEEPROM(1);
+  if(val1 != 255){
+    limTemp = val1;
+  }
+  if(val2 != 255){
+    limSoil = val2;
+  }
+
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi ");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.println(WiFi.localIP());
+
+  // Khởi tạo WebSocket
+  initWebSocket();
+
+  // Route chính
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
+    request->send_P(200, "text/html", index_html, processor);
+  });
+
+  // Routes cho sensor data
+  server.on("/temperature", HTTP_GET, [](AsyncWebServerRequest* request) {
+    request->send(200, "text/plain", String(t).c_str());
+  });
+
+  server.on("/humidity", HTTP_GET, [](AsyncWebServerRequest* request) {
+    request->send(200, "text/plain", String(h).c_str());
+  });
+
+  server.on("/lightIntensity", HTTP_GET, [](AsyncWebServerRequest* request) {
+    request->send(200, "text/plain", String(brightness).c_str());
+  });
+
+  server.on("/soilMoisture", HTTP_GET, [](AsyncWebServerRequest* request) {
+    request->send(200, "text/plain", String(soil).c_str());
+  });
+
+  server.on("/wifiSignal", HTTP_GET, [](AsyncWebServerRequest* request) {
+    request->send(200, "text/plain", String(WiFi.RSSI()).c_str());
+  });
+
+  server.begin();
+
+  dht.begin();
+  t = dht.readTemperature();
+  h = dht.readHumidity();
+
+  if (isnan(t) || isnan(h)) {
+    t = 0;
+    h = 0;
+  }
+
+  pinMode(btnPin, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(btnPin), debounceBtn, FALLING);
+
+  pinMode(ledPin, OUTPUT);
+  pinMode(pumperPin, OUTPUT);
+  pinMode(fanPin, OUTPUT);
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    for (;;)
+      ;
+  }
+
+  delay(2000);
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+
+  for (uint8_t i = 0; i <= 100; i++) {
+    dispLoading(i, 50);
+    display.clearDisplay();
+  }
+}
+
+const uint16_t duration = 5000;
+
 // indent: 255-> center, otherwise: indent
 void alignText(uint8_t y, String text, uint8_t indent = 255, uint8_t textSize = 1, bool textColour = 1) {
   uint8_t totalWidth = (textSize == 1) ? 6 * text.length() - 1 : 13 * text.length() - 3;
@@ -154,18 +942,11 @@ void dispTempHumi(float* t = nullptr, float* h = nullptr, bool detail = false) {
   static unsigned long prevTime = 0;
   unsigned long currentTime = millis();
 
-  static float tempC = -1, humidity = -1;
+  static float tempC, humidity;
   if (currentTime - prevTime >= duration) {
     tempC = dht.readTemperature();
     humidity = dht.readHumidity();
     prevTime = currentTime;
-  }
-
-  if (tempC == -1 && humidity == -1) {
-    for (uint8_t i = 0; i <= 100; i++) {
-      dispLoading(i, 50);
-      display.clearDisplay();
-    }
   }
 
   if (isnan(tempC) || isnan(humidity)) {
@@ -244,8 +1025,6 @@ uint8_t save() {
   return 255;
 }
 
-float limTemp = 30;
-float limSoil = 50;
 bool isSleep = false;
 
 bool savedWindow = false;
@@ -272,6 +1051,11 @@ void setVal(String header, int start, int stop, char unit, float* target) {
       savedTemp = true;
       savedWindow = false;
       numPressed = 0;
+      if (target == &limTemp) {
+        saveToEEPROM(0,temp);
+      }else if(target == limSoil){
+        saveToEEPROM(1,temp);
+      }
     } else if (ans == 0) {
       savedTemp = false;
       savedWindow = false;
@@ -400,9 +1184,6 @@ void dispMenu(String options[], const unsigned char* const image_arrays[], void 
   display.display();
 }
 
-bool automatic = true;
-
-bool pumper = false, fan = false, led = false;
 uint8_t manualSelectedOption = 255;
 
 void setPumper() {
@@ -461,6 +1242,7 @@ void manual() {
 }
 
 void diagnose() {
+  
   selectedOption = 255;
 }
 
@@ -471,8 +1253,6 @@ void exit() {
 }
 
 void loop() {
-
-  float t, h;
 
   display.clearDisplay();
 
