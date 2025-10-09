@@ -2,6 +2,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_Sensor.h>
+#include <BH1750.h>
 #include <DHT.h>
 #include <string>
 
@@ -13,6 +14,10 @@
 bool pumper = false, fan = false, led = false;
 float t = 0, h = 0, brightness = 0, soil = 0;
 bool automatic = true;
+uint8_t amountUser = 0;
+
+float limTemp = 30;
+float limSoil = 50;
 
 unsigned long previousMillis = 0;  // will store last time DHT was updated
 const long interval = 10000;       // Updates DHT readings every 10 seconds
@@ -385,7 +390,7 @@ const char index_html[] PROGMEM = R"rawliteral(
             <div class="control-item" id="lightControl">
               <span class="control-label">Đèn LED chính</span>
               <label class="switch">
-                <input type="checkbox" id="mainLight" onchange="toggleDevice('light1', this.checked)" %LEDCHECK% />
+                <input type="checkbox" id="mainLight" onchange="toggleDevice('light', this.checked)" %LEDCHECK% />
                 <span class="slider"></span>
               </label>
             </div>
@@ -398,7 +403,7 @@ const char index_html[] PROGMEM = R"rawliteral(
             <div class="control-item" id="fanControl">
               <span class="control-label">Quạt thông gió</span>
               <label class="switch">
-                <input type="checkbox" id="ventilationFan" onchange="toggleDevice('fan1', this.checked)" %FANCHECK% />
+                <input type="checkbox" id="ventilationFan" onchange="toggleDevice('fan', this.checked)" %FANCHECK% />
                 <span class="slider"></span>
               </label>
             </div>
@@ -411,7 +416,7 @@ const char index_html[] PROGMEM = R"rawliteral(
             <div class="control-item" id="pumpControl">
               <span class="control-label">Máy bơm nước</span>
               <label class="switch">
-                <input type="checkbox" id="waterPump" onchange="toggleDevice('pump1', this.checked)" %PUMPCHECK% />
+                <input type="checkbox" id="waterPump" onchange="toggleDevice('pump', this.checked)" %PUMPCHECK% />
                 <span class="slider"></span>
               </label>
             </div>
@@ -446,6 +451,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     <script>
       let isConnected = false;
       let isAutoMode = %AUTOMODE%;
+      let updateInterval = 5000;
       var gateway = `ws://${window.location.hostname}/ws`;
       var websocket;
 
@@ -488,9 +494,9 @@ const char index_html[] PROGMEM = R"rawliteral(
         let deviceId = event.data.slice(0, -1);
         let state = event.data.endsWith("1");
         const mapId = {
-          pump1: "waterPump",
-          light1: "mainLight",
-          fan1: "ventilationFan"
+          pump: "waterPump",
+          light: "mainLight",
+          fan: "ventilationFan"
         };
 
         if (mapId[deviceId]) {
@@ -563,12 +569,12 @@ const char index_html[] PROGMEM = R"rawliteral(
         }
         
         const deviceNames = {
-          light1: "Đèn LED chính",
-          fan1: "Quạt thông gió",
-          pump1: "Máy bơm nước"
+          light: "Đèn LED chính",
+          fan: "Quạt thông gió",
+          pump: "Máy bơm nước"
         };
         const action = state ? "BẬT" : "TẮT";
-        addLogEntry(`${action} ${deviceNames[deviceId]}`);
+        addLogEntry(`${action} ${deviceNames[deviceId]}`);  
         websocket.send(deviceId + (state ? "1" : "0"));
       }
 
@@ -643,7 +649,7 @@ const char index_html[] PROGMEM = R"rawliteral(
               data + '<span class="sensor-unit">°C</span>';
             updateProgressBar('tempProgress', temp, 50);
           });
-      }, 10000);
+      }, updateInterval );
 
       setInterval(function () {
         fetch("/humidity")
@@ -654,7 +660,7 @@ const char index_html[] PROGMEM = R"rawliteral(
               data + '<span class="sensor-unit">%%</span>';
             updateProgressBar('humidityProgress', hum, 100);
           });
-      }, 10000);
+      }, updateInterval );
 
       setInterval(function () {
         fetch("/lightIntensity")
@@ -663,9 +669,9 @@ const char index_html[] PROGMEM = R"rawliteral(
             const light = parseFloat(data);
             document.getElementById("lightIntensity").innerHTML = 
               data + '<span class="sensor-unit">lux</span>';
-            updateProgressBar('lightProgress', light, 1000);
+            updateProgressBar('lightProgress', light, 65535);
           });
-      }, 10000);
+      }, updateInterval );
 
       setInterval(function () {
         fetch("/soilMoisture")
@@ -676,7 +682,7 @@ const char index_html[] PROGMEM = R"rawliteral(
               data + '<span class="sensor-unit">%%</span>';
             updateProgressBar('soilProgress', soil, 100);
           });
-      }, 10000);
+      }, updateInterval );
     </script>
   </body>
 </html>
@@ -696,7 +702,7 @@ void handleWebSocketMessage(void* arg, uint8_t* data, size_t len) {
       automatic = false;
       bool state = strstr((char*)data, "1");
 
-      if (strstr((char*)data, "led")) {
+      if (strstr((char*)data, "light")) {
         led = state;
       } else if (strstr((char*)data, "pump")) {
         pumper = state;
@@ -709,11 +715,14 @@ void handleWebSocketMessage(void* arg, uint8_t* data, size_t len) {
 }
 
 void onEvent(AsyncWebSocket* server, AsyncWebSocketClient* client, AwsEventType type, void* arg, uint8_t* data, size_t len) {
+
   switch (type) {
     case WS_EVT_CONNECT:
+      amountUser++;
       Serial.printf("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
       break;
     case WS_EVT_DISCONNECT:
+      amountUser--;
       Serial.printf("WebSocket client #%u disconnected\n", client->id());
       break;
     case WS_EVT_DATA:
@@ -765,16 +774,22 @@ String processor(const String& var) {
 // Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
-#define DHTPIN 14  // Digital pin connected to the DHT sensor
+#define DHTPIN 14
 #define btnPin 2
 #define pumperPin 12
 #define fanPin 13
 #define ledPin 15
 
+#define NUMDEVICES 3
+#define EEPROM_SIZE 32
+// 32 bytes
+
 // Uncomment the type of sensor in use:
 #define DHTTYPE DHT11  // DHT 11
 
 DHT dht(DHTPIN, DHTTYPE);
+
+BH1750 lightMeter;
 
 const uint8_t bounceDuration = 200;
 bool btnPressed = false,
@@ -827,22 +842,21 @@ float readFromEEPROM(int address) {
   return EEPROM.read(address);
 }
 
-float limTemp = 30;
-float limSoil = 50;
-
-#define EEPROM_SIZE 32
-// 32 bytes 
-
 void setup() {
   Serial.begin(115200);
+
+  Wire.begin();
+  lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x23);
+  Serial.println("BH1750 begin");
+
   EEPROM.begin(EEPROM_SIZE);
 
   float val1 = readFromEEPROM(0);
   float val2 = readFromEEPROM(1);
-  if(val1 != 255){
+  if (val1 != 255) {
     limTemp = val1;
   }
-  if(val2 != 255){
+  if (val2 != 255) {
     limSoil = val2;
   }
 
@@ -918,7 +932,6 @@ void setup() {
   }
 }
 
-const uint16_t duration = 5000;
 
 // indent: 255-> center, otherwise: indent
 void alignText(uint8_t y, String text, uint8_t indent = 255, uint8_t textSize = 1, bool textColour = 1) {
@@ -938,24 +951,59 @@ void alignText(uint8_t y, String text, uint8_t indent = 255, uint8_t textSize = 
   display.print(text);
 }
 
-void dispTempHumi(float* t = nullptr, float* h = nullptr, bool detail = false) {
-  static unsigned long prevTime = 0;
+#define SENSOR_UPDATE_INTERVAL 5000
+void updateData() {
+  static unsigned long lastUpdate = 0;
   unsigned long currentTime = millis();
 
-  static float tempC, humidity;
-  if (currentTime - prevTime >= duration) {
-    tempC = dht.readTemperature();
-    humidity = dht.readHumidity();
-    prevTime = currentTime;
+  if (currentTime - lastUpdate < SENSOR_UPDATE_INTERVAL) {
+    return;
   }
 
-  if (isnan(tempC) || isnan(humidity)) {
-    Serial.println("Failed to read from DHT sensor!");
+  lastUpdate = currentTime;
+
+  float tempReading = dht.readTemperature();
+  float humidityReading = dht.readHumidity();
+
+  if (!isnan(tempReading)) {
+    t = tempReading;
+  } else {
+    Serial.println("Lỗi đọc nhiệt độ từ DHT11");
   }
 
-  if (h != nullptr) { *h = humidity; }
-  if (t != nullptr) { *t = tempC; }
-  // clear display
+  if (!isnan(humidityReading)) {
+    h = humidityReading;
+  } else {
+    Serial.println("Lỗi đọc độ ẩm từ DHT11");
+  }
+
+  float lightReading = lightMeter.readLightLevel();
+
+  if (!isnan(lightReading) && lightReading >= 0) {
+    brightness = lightReading;
+  } else {
+    Serial.println("Lỗi đọc cảm biến ánh sáng BH1750");
+  }
+}
+
+#define MAX_ENV_BRIGHTNESS 20000
+
+void updateDeviceState() {
+  int dutyCycle;
+  if (automatic) {
+    t > limTemp ? fan = true : fan = false;
+    soil < limSoil ? pumper = true : pumper = false;
+    float ratio = (MAX_ENV_BRIGHTNESS - brightness) / MAX_ENV_BRIGHTNESS;
+    dutyCycle = (int)(ratio * 255.0);
+  }
+
+  digitalWrite(fanPin, fan);
+  digitalWrite(pumperPin, pumper);
+  analogWrite(ledPin, automatic ? dutyCycle : led * 255);
+}
+
+void dispTempHumi(bool detail = false) {
+
   display.clearDisplay();
 
   // display temperature
@@ -964,7 +1012,7 @@ void dispTempHumi(float* t = nullptr, float* h = nullptr, bool detail = false) {
   display.print("Temperature: ");
   display.setTextSize(2);
   display.setCursor(0, 10);
-  display.print(tempC);
+  display.print(t);
   display.print(" ");
   display.setTextSize(1);
   display.cp437(true);
@@ -979,7 +1027,7 @@ void dispTempHumi(float* t = nullptr, float* h = nullptr, bool detail = false) {
     display.print("Humidity: ");
     display.setTextSize(2);
     display.setCursor(0, 45);
-    display.print(humidity);
+    display.print(h);
     display.print(" %");
   }
   display.display();
@@ -994,16 +1042,13 @@ uint8_t numSelected(uint8_t numOptions, uint8_t offset = 0) {
 
 uint8_t selectedOption = 255;
 
-uint8_t save() {
+uint8_t popup(String header) {
   bool ans = numSelected(2);
 
   display.drawRect(17, 15, 94, 34, 1);
 
-  display.setTextSize(1);
-  display.setTextColor(1);
-  display.setTextWrap(false);
-  display.setCursor(49, 17);
-  display.print("Save ?");
+  //49,17
+  alignText(17, header + " ?");
 
   if (ans) {
     display.drawRect(21, 33, 39, 13, 1);
@@ -1046,15 +1091,15 @@ void setVal(String header, int start, int stop, char unit, float* target) {
   }
 
   if (savedWindow) {
-    uint8_t ans = save();
+    uint8_t ans = popup("Save");
     if (ans == 1) {
       savedTemp = true;
       savedWindow = false;
       numPressed = 0;
       if (target == &limTemp) {
-        saveToEEPROM(0,temp);
-      }else if(target == limSoil){
-        saveToEEPROM(1,temp);
+        saveToEEPROM(0, temp);
+      } else if (target == &limSoil) {
+        saveToEEPROM(1, temp);
       }
     } else if (ans == 0) {
       savedTemp = false;
@@ -1207,9 +1252,11 @@ void exitManual() {
   led = false;
   manualSelectedOption = 255;
   selectedOption = 255;
+  automatic = true;
 }
 
 void manual() {
+  automatic = false;
 
   static const unsigned char PROGMEM image_display_brightness_bits[] = { 0x01, 0x00, 0x21, 0x08, 0x10, 0x10, 0x03, 0x80, 0x8c, 0x62, 0x48, 0x24, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x48, 0x24, 0x8c, 0x62, 0x03, 0x80, 0x10, 0x10, 0x21, 0x08, 0x01, 0x00, 0x00, 0x00 };
 
@@ -1235,14 +1282,20 @@ void manual() {
 
   void (*function[4])(void) = { setPumper, setFan, setLed, exitManual };
   dispMenu(options, image_arrays, function, 4, &manualSelectedOption);
-
-  digitalWrite(ledPin, led);
-  digitalWrite(fanPin, fan);
-  digitalWrite(pumperPin, pumper);
 }
 
 void diagnose() {
-  
+  static unsigned long prevTime = millis();
+  unsigned long currentTime = millis();
+  static uint8_t currentDevice = 1;
+  String deviceNames[] = { "LED", "FAN", "PUMPER" };
+
+  if (currentTime - prevTime >= 5000) {
+    display.clearDisplay();
+    uint8_t ans = popup(deviceNames[currentDevice] + " working ?");
+    currentDevice == NUMDEVICES ? currentDevice = 1 : currentDevice++;
+  }
+
   selectedOption = 255;
 }
 
@@ -1253,11 +1306,21 @@ void exit() {
 }
 
 void loop() {
+  Serial.println(automatic);
 
   display.clearDisplay();
+  updateData();
+  updateDeviceState();
+  
+  if (amountUser != 0) {
+    Serial.println(amountUser);
+    display.Adafruit_SSD1306::ssd1306_command(SSD1306_DISPLAYOFF);
+    return;
+  }
+  display.Adafruit_SSD1306::ssd1306_command(SSD1306_DISPLAYON);
 
   if (!isSettings) {
-    dispTempHumi(&t, &h, false);
+    dispTempHumi(false);
   } else {
     static const unsigned char PROGMEM image_device_sleep_mode_white_bits[] = { 0x04, 0x00, 0x1c, 0x0e, 0x28, 0x02, 0x48, 0x04, 0x51, 0xee, 0x90, 0x40, 0x90, 0x80, 0x91, 0xe0, 0x88, 0x00, 0x88, 0x06, 0x46, 0x1c, 0x41, 0xe4, 0x20, 0x08, 0x18, 0x30, 0x07, 0xc0, 0x00, 0x00 };
 
