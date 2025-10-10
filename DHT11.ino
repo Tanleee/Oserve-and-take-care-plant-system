@@ -5,11 +5,15 @@
 #include <BH1750.h>
 #include <DHT.h>
 #include <string>
-
 #include <EEPROM.h>
-#include <ESP8266WiFi.h>
-#include <ESPAsyncTCP.h>
+
+#include <WiFi.h>
+#include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
+
+// #include <ESP8266WiFi.h>
+// #include <ESPAsyncTCP.h>
+// #include <ESPAsyncWebServer.h>
 
 bool pumper = false, fan = false, led = false;
 float t = 0, h = 0, brightness = 0, soil = 0;
@@ -22,8 +26,8 @@ float limSoil = 50;
 unsigned long previousMillis = 0;  // will store last time DHT was updated
 const long interval = 10000;       // Updates DHT readings every 10 seconds
 
-const char* ssid = "C427";
-const char* password = "64546743";
+const char* ssid = "ASUS_VIVOBOOK";
+const char* password = "leduytan123";
 
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
@@ -774,18 +778,21 @@ String processor(const String& var) {
 // Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
-#define DHTPIN 14
-#define btnPin 2
-#define pumperPin 12
-#define fanPin 13
-#define ledPin 15
+#define DHTPIN 8
+#define btnPin 1
+#define pumperPin 7
+#define fanPin 6
+#define ledPin 18
+#define potenPin 2
+#define soilPin 0
 
 #define NUMDEVICES 3
 #define EEPROM_SIZE 32
 // 32 bytes
+#define DHTTYPE DHT11  
 
-// Uncomment the type of sensor in use:
-#define DHTTYPE DHT11  // DHT 11
+#define SENSOR_UPDATE_INTERVAL 5000
+
 
 DHT dht(DHTPIN, DHTTYPE);
 
@@ -844,8 +851,10 @@ float readFromEEPROM(int address) {
 
 void setup() {
   Serial.begin(115200);
+  delay(500);
 
-  Wire.begin();
+  Wire.begin(4,5);
+  
   lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x23);
   Serial.println("BH1750 begin");
 
@@ -860,6 +869,7 @@ void setup() {
     limSoil = val2;
   }
 
+  WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
   Serial.print("Connecting to WiFi ");
   while (WiFi.status() != WL_CONNECTED) {
@@ -915,6 +925,8 @@ void setup() {
   pinMode(ledPin, OUTPUT);
   pinMode(pumperPin, OUTPUT);
   pinMode(fanPin, OUTPUT);
+  pinMode(potenPin, INPUT);
+  pinMode(soilPin, INPUT);
 
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println(F("SSD1306 allocation failed"));
@@ -951,7 +963,6 @@ void alignText(uint8_t y, String text, uint8_t indent = 255, uint8_t textSize = 
   display.print(text);
 }
 
-#define SENSOR_UPDATE_INTERVAL 5000
 void updateData() {
   static unsigned long lastUpdate = 0;
   unsigned long currentTime = millis();
@@ -984,6 +995,8 @@ void updateData() {
   } else {
     Serial.println("Lỗi đọc cảm biến ánh sáng BH1750");
   }
+
+  soil = 100 - ((float)analogRead(soilPin))*100/4096;
 }
 
 #define MAX_ENV_BRIGHTNESS 20000
@@ -1034,8 +1047,8 @@ void dispTempHumi(bool detail = false) {
 }
 
 uint8_t numSelected(uint8_t numOptions, uint8_t offset = 0) {
-  float val = analogRead(A0);
-  uint8_t num = floor((val * numOptions / 1023));
+  float val = analogRead(potenPin);
+  uint8_t num = floor((val * numOptions / 4096));
   if (num == numOptions) { --num; }
   return (num + offset);
 }
@@ -1199,7 +1212,9 @@ void setSleep() {
   btnPressed = false;
 }
 
-void dispMenu(String options[], const unsigned char* const image_arrays[], void (*function[])(void), uint8_t numOptions, uint8_t* placeHolder) {
+void dispMenu(String options[], const unsigned char* const image_arrays[], void (*function[])(void), uint8_t numOptions, uint8_t* placeHolder, bool checkBox = false) {
+
+  static const unsigned char PROGMEM image_choice_bullet_off_bits[] = { 0x07, 0xc0, 0x1c, 0x70, 0x30, 0x18, 0x60, 0x0c, 0x40, 0x04, 0xc0, 0x06, 0x80, 0x02, 0x80, 0x02, 0x80, 0x02, 0xc0, 0x06, 0x40, 0x04, 0x60, 0x0c, 0x30, 0x18, 0x1c, 0x70, 0x07, 0xc0, 0x00, 0x00 };
 
   uint8_t hover = numSelected(numOptions);
 
@@ -1219,7 +1234,7 @@ void dispMenu(String options[], const unsigned char* const image_arrays[], void 
 
   for (uint8_t i = start; i < start + dispAmount && i < numOptions; i++) {
     if (i == hover) {
-      display.drawRect(0, y, 128, 20, WHITE);  // 20 = 2+16+2
+      checkBox ? display.drawBitmap(0, y, image_choice_bullet_off_bits, 15, 16, 1) : display.drawRect(0, y, 128, 20, WHITE);  // 20 = 2+16+2
     }
     alignText(y + 6, options[i], 30);
     display.drawBitmap(2, y + 2, image_arrays[i], 16, 16, 1);
@@ -1285,16 +1300,30 @@ void manual() {
 }
 
 void diagnose() {
-  static unsigned long prevTime = millis();
-  unsigned long currentTime = millis();
-  static uint8_t currentDevice = 1;
-  String deviceNames[] = { "LED", "FAN", "PUMPER" };
+  // static unsigned long prevTime = millis();
+  // unsigned long currentTime = millis();
+  // static uint8_t currentDevice = 1;
+  // String deviceNames[] = { "LED", "FAN", "PUMPER" };
 
-  if (currentTime - prevTime >= 5000) {
-    display.clearDisplay();
-    uint8_t ans = popup(deviceNames[currentDevice] + " working ?");
-    currentDevice == NUMDEVICES ? currentDevice = 1 : currentDevice++;
-  }
+
+  // String options[] = {
+  //   "All",
+  //   "Pumper",
+  //   "Fan",
+  //   "Led"
+  // };
+
+  // void (*function[6])(void) = { setTemp, setSoil, setSleep, manual, diagnose, exit };
+
+  // dispMenu();
+
+  // if (currentTime - prevTime >= 5000) {
+  //   uint8_t ans = popup(deviceNames[currentDevice] + " working ?");
+  //   currentDevice == NUMDEVICES ? currentDevice = 1 : currentDevice++;
+  // }
+
+  // if (currentDevice) {
+  // }
 
   selectedOption = 255;
 }
@@ -1306,14 +1335,12 @@ void exit() {
 }
 
 void loop() {
-  Serial.println(automatic);
 
   display.clearDisplay();
   updateData();
   updateDeviceState();
-  
+
   if (amountUser != 0) {
-    Serial.println(amountUser);
     display.Adafruit_SSD1306::ssd1306_command(SSD1306_DISPLAYOFF);
     return;
   }
