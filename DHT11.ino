@@ -11,9 +11,8 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 
-// #include <ESP8266WiFi.h>
-// #include <ESPAsyncTCP.h>
-// #include <ESPAsyncWebServer.h>
+#include <ESPmDNS.h>
+#include "qrcode.h"
 
 bool pumper = false, fan = false, led = false;
 float t = 0, h = 0, brightness = 0, soil = 0;
@@ -23,11 +22,9 @@ uint8_t amountUser = 0;
 float limTemp = 30;
 float limSoil = 50;
 
-unsigned long previousMillis = 0;  // will store last time DHT was updated
-const long interval = 10000;       // Updates DHT readings every 10 seconds
-
-const char* ssid = "ASUS_VIVOBOOK";
-const char* password = "leduytan123";
+const char* ssid = "C427";
+const char* password = "64546743";
+const char* hostname = "greenops";
 
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
@@ -490,7 +487,7 @@ const char index_html[] PROGMEM = R"rawliteral(
           return;
         } else if (event.data == "manual") {
           isAutoMode = false;
-          document.getElementById("autoMode").checked = false;
+          document.getElementById("auto").checked = false;
           updateControlStates();
           return;
         }
@@ -673,7 +670,7 @@ const char index_html[] PROGMEM = R"rawliteral(
             const light = parseFloat(data);
             document.getElementById("lightIntensity").innerHTML = 
               data + '<span class="sensor-unit">lux</span>';
-            updateProgressBar('lightProgress', light, 65535);
+            updateProgressBar('lightProgress', light, 30000);
           });
       }, updateInterval );
 
@@ -789,9 +786,10 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 #define NUMDEVICES 3
 #define EEPROM_SIZE 32
 // 32 bytes
-#define DHTTYPE DHT11  
+#define DHTTYPE DHT11
 
-#define SENSOR_UPDATE_INTERVAL 5000
+#define SENSOR_UPDATE_INTERVAL 5
+#define FREQ 1000000
 
 
 DHT dht(DHTPIN, DHTTYPE);
@@ -849,42 +847,34 @@ float readFromEEPROM(int address) {
   return EEPROM.read(address);
 }
 
-void setup() {
-  Serial.begin(115200);
-  delay(500);
-
-  Wire.begin(4,5);
-  
-  lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x23);
-  Serial.println("BH1750 begin");
-
-  EEPROM.begin(EEPROM_SIZE);
-
-  float val1 = readFromEEPROM(0);
-  float val2 = readFromEEPROM(1);
-  if (val1 != 255) {
-    limTemp = val1;
+volatile bool shouldUpdateSensors = false;
+void IRAM_ATTR onTimer() {
+  if (automatic) {
+    shouldUpdateSensors = true;
+    return;
   }
-  if (val2 != 255) {
-    limSoil = val2;
-  }
+  shouldUpdateSensors = false;
+}
+hw_timer_t* myTimer = NULL;
 
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
-  Serial.print("Connecting to WiFi ");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
-    Serial.print(".");
-  }
-  Serial.println("");
-  Serial.println(WiFi.localIP());
+void initTimerInterrupt() {
+  myTimer = timerBegin(FREQ);
+  timerAttachInterrupt(myTimer, &onTimer);
+  timerAlarm(myTimer, SENSOR_UPDATE_INTERVAL * FREQ, true, 0);
+}
 
-  // Khởi tạo WebSocket
-  initWebSocket();
-
+void initRoutes() {
   // Route chính
   server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
     request->send_P(200, "text/html", index_html, processor);
+  });
+
+  server.on("/ws", HTTP_GET, [](AsyncWebServerRequest* request) {
+    if (ws.canHandle(request)) {
+      ws.handleRequest(request);
+    } else {
+      request->send(404);
+    }
   });
 
   // Routes cho sensor data
@@ -907,7 +897,137 @@ void setup() {
   server.on("/wifiSignal", HTTP_GET, [](AsyncWebServerRequest* request) {
     request->send(200, "text/plain", String(WiFi.RSSI()).c_str());
   });
+}
 
+void initWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  Serial.print("Connecting to WiFi ");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(1000);
+  }
+
+  Serial.println("");
+  Serial.println("IP address: " + WiFi.localIP().toString());
+}
+
+void initDNS() {
+  if (!MDNS.begin(hostname)) {
+    Serial.println("Setting up MDNS error!");
+    while (1) {
+      delay(1000);
+    }
+  }
+  Serial.println("MDNS response start at: http://" + String(hostname) + ".local");
+}
+
+void initPin() {
+  pinMode(btnPin, INPUT_PULLUP);
+  pinMode(ledPin, OUTPUT);
+  pinMode(pumperPin, OUTPUT);
+  pinMode(fanPin, OUTPUT);
+  pinMode(potenPin, INPUT);
+  pinMode(soilPin, INPUT);
+}
+//////////////////////////////////////////////////////////////////////
+// Biến toàn cục
+esp_qrcode_handle_t qrcode_handle = NULL;
+esp_qrcode_config_t qr_config;
+
+// Hàm callback để hiển thị QR code
+void display_qrcode(esp_qrcode_handle_t qrcode) {
+  qrcode_handle = qrcode;
+
+  display.clearDisplay();
+
+  // Lấy kích thước QR code
+  int qr_size = esp_qrcode_get_size(qrcode);
+
+  // Tính toán scale để vừa màn hình
+  int scale = min(SCREEN_WIDTH, SCREEN_HEIGHT) / qr_size;
+  if (scale < 1) scale = 1;
+
+  // Căn giữa QR code
+  int offsetX = (SCREEN_WIDTH - (qr_size * scale)) / 2;
+  int offsetY = (SCREEN_HEIGHT - (qr_size * scale)) / 2;
+
+  // Vẽ QR code
+  for (int y = 0; y < qr_size; y++) {
+    for (int x = 0; x < qr_size; x++) {
+      if (esp_qrcode_get_module(qrcode, x, y)) {
+        display.fillRect(
+          offsetX + (x * scale),
+          offsetY + (y * scale),
+          scale,
+          scale,
+          SSD1306_WHITE);
+      }
+    }
+  }
+
+  display.display();
+}
+
+// Hàm khởi tạo QR code system
+void initQRCode() {
+  // Thiết lập cấu hình QR code một lần
+  qr_config = ESP_QRCODE_CONFIG_DEFAULT();
+  qr_config.display_func = display_qrcode;
+  qr_config.max_qrcode_version = 10;
+  qr_config.qrcode_ecc_level = ESP_QRCODE_ECC_LOW;
+
+  Serial.println("QR Code system đã sẵn sàng!");
+}
+
+// Hàm để cập nhật và hiển thị QR code mới
+void updateQRCode(const char* text) {
+  Serial.print("Đang tạo QR Code với nội dung: ");
+  Serial.println(text);
+
+  esp_err_t err = esp_qrcode_generate(&qr_config, text);
+
+  if (err == ESP_OK) {
+    Serial.println("✓ QR Code đã được tạo thành công!");
+  } else {
+    Serial.println("✗ Lỗi tạo QR Code!");
+    // Hiển thị thông báo lỗi trên màn hình
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(10, 28);
+    display.println(F("Loi tao QR!"));
+    display.display();
+  }
+}
+
+/////////////////////////////////////////////////////////////////////
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  Wire.begin(4, 5);
+
+  lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x23);
+  Serial.println("BH1750 begin");
+
+  EEPROM.begin(EEPROM_SIZE);
+
+  float val1 = readFromEEPROM(0);
+  float val2 = readFromEEPROM(1);
+  if (val1 != 255) {
+    limTemp = val1;
+  }
+  if (val2 != 255) {
+    limSoil = val2;
+  }
+
+  initWiFi();
+  initDNS();
+
+  initWebSocket();
+  initRoutes();
   server.begin();
 
   dht.begin();
@@ -919,14 +1039,7 @@ void setup() {
     h = 0;
   }
 
-  pinMode(btnPin, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(btnPin), debounceBtn, FALLING);
-
-  pinMode(ledPin, OUTPUT);
-  pinMode(pumperPin, OUTPUT);
-  pinMode(fanPin, OUTPUT);
-  pinMode(potenPin, INPUT);
-  pinMode(soilPin, INPUT);
+  initPin();
 
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println(F("SSD1306 allocation failed"));
@@ -938,10 +1051,15 @@ void setup() {
   display.clearDisplay();
   display.setTextColor(WHITE);
 
+  initQRCode();
+
   for (uint8_t i = 0; i <= 100; i++) {
     dispLoading(i, 50);
     display.clearDisplay();
   }
+
+  attachInterrupt(digitalPinToInterrupt(btnPin), debounceBtn, FALLING);
+  initTimerInterrupt();
 }
 
 
@@ -964,14 +1082,14 @@ void alignText(uint8_t y, String text, uint8_t indent = 255, uint8_t textSize = 
 }
 
 void updateData() {
-  static unsigned long lastUpdate = 0;
-  unsigned long currentTime = millis();
+  // static unsigned long lastUpdate = 0;
+  // unsigned long currentTime = millis();
 
-  if (currentTime - lastUpdate < SENSOR_UPDATE_INTERVAL) {
-    return;
-  }
+  // if (currentTime - lastUpdate < SENSOR_UPDATE_INTERVAL) {
+  //   return;
+  // }
 
-  lastUpdate = currentTime;
+  // lastUpdate = currentTime;
 
   float tempReading = dht.readTemperature();
   float humidityReading = dht.readHumidity();
@@ -996,7 +1114,7 @@ void updateData() {
     Serial.println("Lỗi đọc cảm biến ánh sáng BH1750");
   }
 
-  soil = 100 - ((float)analogRead(soilPin))*100/4096;
+  soil = 100 - ((float)analogRead(soilPin)) * 100 / 4096;
 }
 
 #define MAX_ENV_BRIGHTNESS 20000
@@ -1328,6 +1446,23 @@ void diagnose() {
   selectedOption = 255;
 }
 
+void about() {
+  String qrContent = "=== HE THONG CHAM SOC CAY ===\n";
+  qrContent += "ID: ESP32-" + String((uint32_t)ESP.getEfuseMac(), HEX).substring(0, 6) + "\n";
+  qrContent += "Model: ESP32-C3\n";
+  qrContent += "Firmware: v1.2.3\n";
+  qrContent += "IP: " + WiFi.localIP().toString() + "\n";
+  qrContent += ("Web: http://" + String(hostname) + ".local\n");
+  qrContent += "Hotline: 0339507429";
+
+  updateQRCode(qrContent.c_str());
+  
+  if(btnPressed){
+    selectedOption = 255;
+    btnPressed = false;
+  }
+}
+
 void exit() {
   isSettings = false;
   btnPressed = false;
@@ -1335,9 +1470,11 @@ void exit() {
 }
 
 void loop() {
-
   display.clearDisplay();
-  updateData();
+
+  if (shouldUpdateSensors) {
+    updateData();
+  }
   updateDeviceState();
 
   if (amountUser != 0) {
@@ -1361,12 +1498,15 @@ void loop() {
 
     static const unsigned char PROGMEM image_menu_settings_sliders_bits[] = { 0x38, 0x00, 0x44, 0x00, 0xc7, 0xfc, 0x44, 0x00, 0x38, 0x00, 0x00, 0x70, 0x00, 0x88, 0xff, 0x8c, 0x00, 0x88, 0x00, 0x70, 0x38, 0x00, 0x44, 0x00, 0xc7, 0xfc, 0x44, 0x00, 0x38, 0x00, 0x00, 0x00 };
 
+    static const unsigned char PROGMEM image_menu_information_sign_white_bits[] = { 0x07, 0xc0, 0x18, 0x30, 0x23, 0x08, 0x42, 0x84, 0x43, 0x04, 0x80, 0x02, 0x83, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x42, 0x84, 0x43, 0x84, 0x20, 0x08, 0x18, 0x30, 0x07, 0xc0, 0x00, 0x00 };
+
     static const unsigned char* const image_arrays[] = {
       image_Temperature_bits,
       image_weather_humidity_white_bits,
       image_device_sleep_mode_white_bits,
       image_menu_settings_sliders_bits,
       image_menu_tool_wrench_bits,
+      image_menu_information_sign_white_bits,
       image_crossed_bits
     };
 
@@ -1376,11 +1516,12 @@ void loop() {
       "Sleep: " + String(isSleep ? "ON" : "OFF"),
       "Manual",
       "System diagnose",
+      "About",
       "Exit"
     };
 
-    void (*function[6])(void) = { setTemp, setSoil, setSleep, manual, diagnose, exit };
+    void (*function[7])(void) = { setTemp, setSoil, setSleep, manual, diagnose, about, exit };
 
-    dispMenu(options, image_arrays, function, 6, &selectedOption);
+    dispMenu(options, image_arrays, function, 7, &selectedOption);
   }
 }
