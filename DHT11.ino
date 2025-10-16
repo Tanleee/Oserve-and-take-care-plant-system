@@ -10,8 +10,9 @@
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
-
 #include <ESPmDNS.h>
+
+#include <time.h>
 #include "qrcode.h"
 
 bool pumper = false, fan = false, led = false;
@@ -25,6 +26,12 @@ float limSoil = 50;
 const char* ssid = "C427";
 const char* password = "64546743";
 const char* hostname = "greenops";
+
+IPAddress local_IP(192, 168, 1, 10);
+IPAddress gateway(192, 168, 1, 1);
+IPAddress subnet(255, 255, 255, 0);
+IPAddress primaryDNS(8, 8, 8, 8);
+IPAddress secondaryDNS(8, 8, 4, 4);
 
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
@@ -487,7 +494,7 @@ const char index_html[] PROGMEM = R"rawliteral(
           return;
         } else if (event.data == "manual") {
           isAutoMode = false;
-          document.getElementById("auto").checked = false;
+          document.getElementById("autoMode").checked = false;
           updateControlStates();
           return;
         }
@@ -699,6 +706,8 @@ void handleWebSocketMessage(void* arg, uint8_t* data, size_t len) {
     data[len] = 0;
     if (strcmp((char*)data, "auto") == 0) {
       automatic = true;
+    } else if (strcmp((char*)data, "manual") == 0) {
+      automatic = false;
     } else {
       automatic = false;
       bool state = strstr((char*)data, "1");
@@ -791,6 +800,9 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 #define SENSOR_UPDATE_INTERVAL 5
 #define FREQ 1000000
 
+const char* ntpServer = "time.google.com";
+const unsigned long gmtOffset_sec = 7 * 3600;
+const int daylightOffset_sec = 0;
 
 DHT dht(DHTPIN, DHTTYPE);
 
@@ -828,7 +840,7 @@ void dispLoading(uint8_t percent, int delayTime) {
   display.print(buffer);
 
   display.setCursor(13, 1);
-  display.print("Please waiting...");
+  display.print(F("Please waiting..."));
 
   display.drawLine(0, 9, 126, 9, 1);
 
@@ -903,19 +915,23 @@ void initWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
 
-  Serial.print("Connecting to WiFi ");
+  if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS)) {
+    Serial.println(F("IP configure fail!"));
+  }
+
+  Serial.print(F("Connecting to WiFi "));
   while (WiFi.status() != WL_CONNECTED) {
-    Serial.print(".");
+    Serial.print(F("."));
     delay(1000);
   }
 
-  Serial.println("");
+  Serial.println(F(""));
   Serial.println("IP address: " + WiFi.localIP().toString());
 }
 
 void initDNS() {
   if (!MDNS.begin(hostname)) {
-    Serial.println("Setting up MDNS error!");
+    Serial.println(F("Setting up MDNS error!"));
     while (1) {
       delay(1000);
     }
@@ -932,11 +948,9 @@ void initPin() {
   pinMode(soilPin, INPUT);
 }
 //////////////////////////////////////////////////////////////////////
-// Biến toàn cục
 esp_qrcode_handle_t qrcode_handle = NULL;
 esp_qrcode_config_t qr_config;
 
-// Hàm callback để hiển thị QR code
 void display_qrcode(esp_qrcode_handle_t qrcode) {
   qrcode_handle = qrcode;
 
@@ -978,26 +992,20 @@ void initQRCode() {
   qr_config.max_qrcode_version = 10;
   qr_config.qrcode_ecc_level = ESP_QRCODE_ECC_LOW;
 
-  Serial.println("QR Code system đã sẵn sàng!");
+  Serial.println(F("QR Code system đã sẵn sàng!"));
 }
 
 // Hàm để cập nhật và hiển thị QR code mới
 void updateQRCode(const char* text) {
-  Serial.print("Đang tạo QR Code với nội dung: ");
-  Serial.println(text);
 
   esp_err_t err = esp_qrcode_generate(&qr_config, text);
 
-  if (err == ESP_OK) {
-    Serial.println("✓ QR Code đã được tạo thành công!");
-  } else {
-    Serial.println("✗ Lỗi tạo QR Code!");
-    // Hiển thị thông báo lỗi trên màn hình
+  if (err != ESP_OK) {
     display.clearDisplay();
     display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(10, 28);
-    display.println(F("Loi tao QR!"));
+    display.setTextColor(1);
+    display.setCursor(8, 29);
+    display.println(F("Error generating QR"));
     display.display();
   }
 }
@@ -1010,7 +1018,7 @@ void setup() {
   Wire.begin(4, 5);
 
   lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x23);
-  Serial.println("BH1750 begin");
+  Serial.println(F("BH1750 begin"));
 
   EEPROM.begin(EEPROM_SIZE);
 
@@ -1053,6 +1061,9 @@ void setup() {
 
   initQRCode();
 
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  delay(1000);
+
   for (uint8_t i = 0; i <= 100; i++) {
     dispLoading(i, 50);
     display.clearDisplay();
@@ -1082,28 +1093,19 @@ void alignText(uint8_t y, String text, uint8_t indent = 255, uint8_t textSize = 
 }
 
 void updateData() {
-  // static unsigned long lastUpdate = 0;
-  // unsigned long currentTime = millis();
-
-  // if (currentTime - lastUpdate < SENSOR_UPDATE_INTERVAL) {
-  //   return;
-  // }
-
-  // lastUpdate = currentTime;
-
   float tempReading = dht.readTemperature();
   float humidityReading = dht.readHumidity();
 
   if (!isnan(tempReading)) {
     t = tempReading;
   } else {
-    Serial.println("Lỗi đọc nhiệt độ từ DHT11");
+    Serial.println(F("Lỗi đọc nhiệt độ từ DHT11"));
   }
 
   if (!isnan(humidityReading)) {
     h = humidityReading;
   } else {
-    Serial.println("Lỗi đọc độ ẩm từ DHT11");
+    Serial.println(F("Lỗi đọc độ ẩm từ DHT11"));
   }
 
   float lightReading = lightMeter.readLightLevel();
@@ -1111,7 +1113,7 @@ void updateData() {
   if (!isnan(lightReading) && lightReading >= 0) {
     brightness = lightReading;
   } else {
-    Serial.println("Lỗi đọc cảm biến ánh sáng BH1750");
+    Serial.println(F("Lỗi đọc cảm biến ánh sáng BH1750"));
   }
 
   soil = 100 - ((float)analogRead(soilPin)) * 100 / 4096;
@@ -1133,34 +1135,69 @@ void updateDeviceState() {
   analogWrite(ledPin, automatic ? dutyCycle : led * 255);
 }
 
-void dispTempHumi(bool detail = false) {
+void overview() {
+  static unsigned long prevTime = millis();
+  unsigned long currentTime = millis();
 
-  display.clearDisplay();
+  static char timeString[10];
+  static char dateString[20];
+  struct tm timeInfo;
 
-  // display temperature
-  display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.print("Temperature: ");
-  display.setTextSize(2);
-  display.setCursor(0, 10);
-  display.print(t);
-  display.print(" ");
-  display.setTextSize(1);
-  display.cp437(true);
-  display.write(167);
-  display.setTextSize(2);
-  display.print("C");
-
-  // display humidity
-  if (detail) {
-    display.setTextSize(1);
-    display.setCursor(0, 35);
-    display.print("Humidity: ");
-    display.setTextSize(2);
-    display.setCursor(0, 45);
-    display.print(h);
-    display.print(" %");
+  if (currentTime - prevTime >= SENSOR_UPDATE_INTERVAL * 1000) {
+    if (!getLocalTime(&timeInfo)) {
+      return;
+    }
+    snprintf(dateString, sizeof(dateString), "%02d/%02d/%04d", timeInfo.tm_mday, timeInfo.tm_mon + 1, timeInfo.tm_year + 1900);
+    snprintf(timeString, sizeof(timeString), "%02d:%02d", timeInfo.tm_hour, timeInfo.tm_min);
+    prevTime = currentTime;
   }
+
+  static const unsigned char PROGMEM image_download_bits[] = { 0x01, 0x00, 0x21, 0x08, 0x10, 0x10, 0x03, 0x80, 0x8c, 0x62, 0x48, 0x24, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x48, 0x24, 0x8c, 0x62, 0x03, 0x80, 0x10, 0x10, 0x21, 0x08, 0x01, 0x00, 0x00, 0x00 };
+
+  static const unsigned char PROGMEM image_tree_bits[] = { 0x05, 0x40, 0x2a, 0xd4, 0x57, 0x26, 0x31, 0xb8, 0x5d, 0xea, 0x87, 0x95, 0x6b, 0x36, 0xbb, 0x68, 0x4f, 0xfd, 0x37, 0xc6, 0x51, 0xa9, 0x29, 0x82, 0x01, 0x80, 0x01, 0x80, 0x03, 0xc0, 0x0f, 0xf0 };
+
+  static const unsigned char PROGMEM image_weather_humidity_white_bits[] = { 0x04, 0x00, 0x04, 0x00, 0x0c, 0x00, 0x0a, 0x00, 0x12, 0x00, 0x11, 0x00, 0x20, 0x80, 0x20, 0x80, 0x41, 0x40, 0x40, 0xc0, 0x80, 0xa0, 0x80, 0x20, 0x40, 0x40, 0x40, 0x40, 0x30, 0x80, 0x0f, 0x00 };
+
+  static const unsigned char PROGMEM image_weather_temperature_bits[] = { 0x1c, 0x00, 0x22, 0x02, 0x2b, 0x05, 0x2a, 0x02, 0x2b, 0x38, 0x2a, 0x60, 0x2b, 0x40, 0x2a, 0x40, 0x2a, 0x60, 0x49, 0x38, 0x9c, 0x80, 0xae, 0x80, 0xbe, 0x80, 0x9c, 0x80, 0x41, 0x00, 0x3e, 0x00 };
+
+
+  display.setTextColor(1);
+  display.setTextWrap(false);
+  display.setCursor(1, 3);
+  display.print(dateString);
+
+  display.drawLine(0, 12, 127, 12, 1);
+
+  display.setCursor(74, 3);
+  display.print(timeString);
+
+  display.drawLine(63, 12, 63, 63, 1);
+
+  display.drawBitmap(2, 45, image_weather_humidity_white_bits, 11, 16, 1);
+
+  display.drawBitmap(2, 17, image_weather_temperature_bits, 16, 16, 1);
+
+  char buffer[20];
+  snprintf(buffer, sizeof(buffer), "%.1f C", t);
+  display.setCursor(22, 22);
+  display.print(buffer);
+
+  display.drawBitmap(66, 46, image_download_bits, 15, 16, 1);
+
+  display.drawBitmap(66, 17, image_tree_bits, 16, 16, 1);
+
+  snprintf(buffer, sizeof(buffer), "%.1f %%", h);
+  display.setCursor(22, 51);
+  display.print(buffer);
+
+  snprintf(buffer, sizeof(buffer), "%.1f %%", soil);
+  display.setCursor(93, 23);
+  display.print(buffer);
+
+  snprintf(buffer, sizeof(buffer), "%.1f lx", brightness);
+  display.setCursor(87, 51);
+  display.print(buffer);
+
   display.display();
 }
 
@@ -1176,10 +1213,9 @@ uint8_t selectedOption = 255;
 uint8_t popup(String header) {
   bool ans = numSelected(2);
 
-  display.drawRect(17, 15, 94, 34, 1);
+  display.drawRect(0, 15, 128, 34, 1);
 
-  //49,17
-  alignText(17, header + " ?");
+  alignText(17, header);
 
   if (ans) {
     display.drawRect(21, 33, 39, 13, 1);
@@ -1222,7 +1258,7 @@ void setVal(String header, int start, int stop, char unit, float* target) {
   }
 
   if (savedWindow) {
-    uint8_t ans = popup("Save");
+    uint8_t ans = popup("Save ?");
     if (ans == 1) {
       savedTemp = true;
       savedWindow = false;
@@ -1330,7 +1366,7 @@ void setSleep() {
   btnPressed = false;
 }
 
-void dispMenu(String options[], const unsigned char* const image_arrays[], void (*function[])(void), uint8_t numOptions, uint8_t* placeHolder, bool checkBox = false) {
+void dispMenu(String options[], const unsigned char* const image_arrays[], void (*function[])(void), uint8_t numOptions, uint8_t* placeHolder, bool checkBox = false, bool checkedPosition[NUMDEVICES + 1] = {}) {
 
   static const unsigned char PROGMEM image_choice_bullet_off_bits[] = { 0x07, 0xc0, 0x1c, 0x70, 0x30, 0x18, 0x60, 0x0c, 0x40, 0x04, 0xc0, 0x06, 0x80, 0x02, 0x80, 0x02, 0x80, 0x02, 0xc0, 0x06, 0x40, 0x04, 0x60, 0x0c, 0x30, 0x18, 0x1c, 0x70, 0x07, 0xc0, 0x00, 0x00 };
 
@@ -1352,11 +1388,38 @@ void dispMenu(String options[], const unsigned char* const image_arrays[], void 
 
   for (uint8_t i = start; i < start + dispAmount && i < numOptions; i++) {
     if (i == hover) {
-      checkBox ? display.drawBitmap(0, y, image_choice_bullet_off_bits, 15, 16, 1) : display.drawRect(0, y, 128, 20, WHITE);  // 20 = 2+16+2
+      if (checkBox) {
+        if (hover == numOptions - 2) {
+          display.fillRoundRect(0, y, 63, 20, 7, 1);
+          alignText(y + 6, options[i], 20, 1, 0);
+          continue;
+        } else if (hover == numOptions - 1) {
+          display.fillRoundRect(65, y, 63, 20, 7, 1);
+          alignText(y + 6, options[i], 78, 1, 0);
+          continue;
+        }
+      }
+      display.drawRect(0, y, 128, 20, WHITE);  // 20 = 2+16+2
     }
-    alignText(y + 6, options[i], 30);
-    display.drawBitmap(2, y + 2, image_arrays[i], 16, 16, 1);
 
+    if (checkBox) {
+      if (i == numOptions - 2 && hover != i) {
+        display.drawRoundRect(0, y, 63, 20, 7, 1);
+        alignText(y + 6, options[i], 20, 1, 1);
+        continue;
+      } else if (i == numOptions - 1 && hover != i) {
+        display.drawRoundRect(65, y, 63, 20, 7, 1);
+        alignText(y + 6, options[i], 78, 1, 1);
+        continue;
+      } else {
+        display.drawBitmap(2, y + 2, image_choice_bullet_off_bits, 16, 16, 1);
+        display.fillCircle(9, y + 9, 5, checkedPosition[i]);
+        alignText(y + 6, options[i], 30);
+      }
+    } else {
+      display.drawBitmap(2, y + 2, image_arrays[i], 16, 16, 1);
+      alignText(y + 6, options[i], 30);
+    }
     y += 21;
   }
   display.display();
@@ -1416,34 +1479,159 @@ void manual() {
   void (*function[4])(void) = { setPumper, setFan, setLed, exitManual };
   dispMenu(options, image_arrays, function, 4, &manualSelectedOption);
 }
+///////////////////////////////////////
+uint8_t diagnoseSelectedOption = 255;
+bool checkList[NUMDEVICES + 1] = {};
+
+void isCheckAll() {
+  checkList[0] = !checkList[0];
+  for (int i = 1; i <= NUMDEVICES; i++) {
+    checkList[i] = checkList[0];
+  }
+  diagnoseSelectedOption = 255;
+}
+
+void isCheckPumper() {
+  checkList[1] = !checkList[1];
+  if (!checkList[1]) {
+    checkList[0] = false;
+  }
+  diagnoseSelectedOption = 255;
+}
+
+void isCheckFan() {
+  checkList[2] = !checkList[2];
+  if (!checkList[2]) {
+    checkList[0] = false;
+  }
+  diagnoseSelectedOption = 255;
+}
+
+void isCheckLed() {
+  checkList[3] = !checkList[3];
+  if (!checkList[3]) {
+    checkList[0] = false;
+  }
+  diagnoseSelectedOption = 255;
+}
+
+void isBack() {
+  diagnoseSelectedOption = 255;
+  selectedOption = 255;
+}
+
+void checkedCompleted(uint8_t* currentDevice, bool* stillWorking, const char** deviceNames, bool* firstTime) {
+  pumper = false, led = false, fan = false;
+  static const unsigned char PROGMEM image_choice_right_bits[] = { 0x03, 0xc0, 0x0c, 0x30, 0x11, 0x88, 0x26, 0x64, 0x48, 0x12, 0x50, 0x0a, 0x90, 0x29, 0xa4, 0x45, 0xa2, 0x85, 0x91, 0x09, 0x50, 0x0a, 0x48, 0x12, 0x26, 0x64, 0x11, 0x88, 0x0c, 0x30, 0x03, 0xc0 };
+
+  static const unsigned char PROGMEM image_choice_wrong_bits[] = { 0x0f, 0xe0, 0x10, 0x10, 0x27, 0xc8, 0x48, 0x24, 0x90, 0x12, 0xa4, 0x4a, 0xa2, 0x8a, 0xa1, 0x0a, 0xa2, 0x8a, 0xa4, 0x4a, 0x90, 0x12, 0x48, 0x24, 0x27, 0xc8, 0x10, 0x10, 0x0f, 0xe0, 0x00, 0x00 };
+
+  display.setTextColor(1);
+  display.setTextWrap(false);
+  display.setCursor(11, 0);
+  display.print("Diagnostic results");
+  display.drawLine(0, 9, 127, 9, 1);
+
+  uint8_t x = 1, y = 15;
+  for (int i = 0; i < NUMDEVICES; i++) {
+    if (!checkList[i + 1]) { continue; }
+
+    display.drawBitmap(x, y, stillWorking[i] ? image_choice_right_bits : image_choice_wrong_bits, 16, 16, 1);
+    display.setCursor(x + 20, y + 5);
+    display.print(deviceNames[i]);
+
+    if (x == 1 && y == 15) {
+      x = 64;
+    } else if (x == 64 && y == 15) {
+      x = 1, y = 40;
+    }
+  }
+
+  display.display();
+  //////////////////////
+  if (btnPressed) {
+    btnPressed = false;
+    *currentDevice = 0;
+    diagnoseSelectedOption = 255;
+    memset(checkList, false, sizeof(checkList));
+    memset(stillWorking, false, sizeof(stillWorking));
+    selectedOption = 255;
+    *firstTime = true;
+  }
+}
+
+#define CHECK_DURATION 5000
+
+void isCheckup() {
+  static unsigned long prevTime = millis();
+  static bool firstTime = true;
+  if (firstTime) {
+    prevTime = millis();
+    firstTime = false;
+  }
+
+  unsigned long currentTime = millis();
+
+  static uint8_t currentDevice = 0;
+  const char* deviceNames[NUMDEVICES] = { "Pumper", "Fan", "Led" };
+  static bool stillWorking[NUMDEVICES] = {};
+  static bool confirmPopup = false;
+
+  char buffer[20];
+  if (currentDevice != NUMDEVICES) {
+    if (currentTime - prevTime >= CHECK_DURATION) {
+      pumper = false, led = false, fan = false;
+
+      if (confirmPopup) {
+        confirmPopup = false;
+        prevTime = currentTime;
+      } else {
+        display.clearDisplay();
+        snprintf(buffer, sizeof(buffer), "%s working ?", deviceNames[currentDevice]);
+        uint8_t ans = popup(buffer);
+
+        if (ans != 255) {
+          stillWorking[currentDevice] = ans;
+          currentDevice++;
+          confirmPopup = true;
+        }
+      }
+    } else {
+      if (!checkList[currentDevice + 1]) {
+        currentDevice++;
+        return;
+      }
+
+      display.clearDisplay();
+
+      snprintf(buffer, sizeof(buffer), "%s turning on...", deviceNames[currentDevice]);
+      alignText(29, buffer);
+      display.display();
+
+      pumper = (currentDevice == 0);
+      fan = (currentDevice == 1);
+      led = (currentDevice == 2);
+    }
+  } else {
+    checkedCompleted(&currentDevice, stillWorking, deviceNames, &firstTime);
+  }
+}
 
 void diagnose() {
-  // static unsigned long prevTime = millis();
-  // unsigned long currentTime = millis();
-  // static uint8_t currentDevice = 1;
-  // String deviceNames[] = { "LED", "FAN", "PUMPER" };
+  automatic = false;
 
+  String options[] = {
+    "All",
+    "Pumper",
+    "Fan",
+    "Led",
+    "Back",
+    "Checkup"
+  };
 
-  // String options[] = {
-  //   "All",
-  //   "Pumper",
-  //   "Fan",
-  //   "Led"
-  // };
+  void (*function[6])(void) = { isCheckAll, isCheckPumper, isCheckFan, isCheckLed, isBack, isCheckup };
 
-  // void (*function[6])(void) = { setTemp, setSoil, setSleep, manual, diagnose, exit };
-
-  // dispMenu();
-
-  // if (currentTime - prevTime >= 5000) {
-  //   uint8_t ans = popup(deviceNames[currentDevice] + " working ?");
-  //   currentDevice == NUMDEVICES ? currentDevice = 1 : currentDevice++;
-  // }
-
-  // if (currentDevice) {
-  // }
-
-  selectedOption = 255;
+  dispMenu(options, NULL, function, 6, &diagnoseSelectedOption, true, checkList);
 }
 
 void about() {
@@ -1456,8 +1644,8 @@ void about() {
   qrContent += "Hotline: 0339507429";
 
   updateQRCode(qrContent.c_str());
-  
-  if(btnPressed){
+
+  if (btnPressed) {
     selectedOption = 255;
     btnPressed = false;
   }
@@ -1474,6 +1662,7 @@ void loop() {
 
   if (shouldUpdateSensors) {
     updateData();
+    shouldUpdateSensors = false;
   }
   updateDeviceState();
 
@@ -1484,7 +1673,7 @@ void loop() {
   display.Adafruit_SSD1306::ssd1306_command(SSD1306_DISPLAYON);
 
   if (!isSettings) {
-    dispTempHumi(false);
+    overview();
   } else {
     static const unsigned char PROGMEM image_device_sleep_mode_white_bits[] = { 0x04, 0x00, 0x1c, 0x0e, 0x28, 0x02, 0x48, 0x04, 0x51, 0xee, 0x90, 0x40, 0x90, 0x80, 0x91, 0xe0, 0x88, 0x00, 0x88, 0x06, 0x46, 0x1c, 0x41, 0xe4, 0x20, 0x08, 0x18, 0x30, 0x07, 0xc0, 0x00, 0x00 };
 
