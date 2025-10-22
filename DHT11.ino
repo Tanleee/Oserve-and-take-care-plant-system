@@ -23,8 +23,8 @@ uint8_t amountUser = 0;
 float limTemp = 30;
 float limSoil = 50;
 
-const char* ssid = "C427";
-const char* password = "64546743";
+const char* ssid = "ASUS_VIVOBOOK";
+const char* password = "leduytan123";
 const char* hostname = "greenops";
 
 IPAddress local_IP(192, 168, 1, 10);
@@ -36,7 +36,6 @@ IPAddress secondaryDNS(8, 8, 4, 4);
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 
-// HTML Template với tính năng đầy đủ
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="vi">
@@ -913,20 +912,34 @@ void initRoutes() {
 
 void initWiFi() {
   WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(100);
+
+  Serial.println("\n=== WiFi Debug ===");
+  Serial.print("SSID: ");
+  Serial.println(ssid);
+  Serial.print("Password length: ");
+  Serial.println(strlen(password));
+
   WiFi.begin(ssid, password);
 
-  if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS)) {
-    Serial.println(F("IP configure fail!"));
-  }
-
-  Serial.print(F("Connecting to WiFi "));
-  while (WiFi.status() != WL_CONNECTED) {
-    Serial.print(F("."));
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+    Serial.print("Status: ");
+    Serial.println(WiFi.status());  
     delay(1000);
+    attempts++;
   }
 
-  Serial.println(F(""));
-  Serial.println("IP address: " + WiFi.localIP().toString());
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n Connected!");
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\n Connection failed!");
+    Serial.print("Final status: ");
+    Serial.println(WiFi.status());
+  }
 }
 
 void initDNS() {
@@ -1557,6 +1570,7 @@ void checkedCompleted(uint8_t* currentDevice, bool* stillWorking, const char** d
     memset(stillWorking, false, sizeof(stillWorking));
     selectedOption = 255;
     *firstTime = true;
+    automatic = true;
   }
 }
 
@@ -1619,6 +1633,10 @@ void isCheckup() {
 
 void diagnose() {
   automatic = false;
+
+  if (diagnoseSelectedOption == 255) {
+    pumper = false, led = false, fan = false;
+  }
 
   String options[] = {
     "All",
