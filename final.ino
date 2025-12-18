@@ -1129,7 +1129,7 @@ void updateData() {
     Serial.println(F("Lỗi đọc cảm biến ánh sáng BH1750"));
   }
 
-  soil = 100 - ((float)analogRead(soilPin)) * 100 / 4096;
+  soil = 100 - ((float)analogRead(soilPin)) * 100 / 4095;
 }
 
 #define MAX_ENV_BRIGHTNESS 20000
